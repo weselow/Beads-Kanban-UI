@@ -396,7 +396,7 @@ export default function KanbanBoard() {
             comments={detailBead.comments}
             beadId={detailBead.id}
             projectPath={project?.path ?? ""}
-            onCommentAdded={refreshBeads}
+            onCommentAdded={() => refreshBeads({ full: true })}
           />
           <ActivityTimeline
             bead={detailBead}

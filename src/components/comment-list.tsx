@@ -15,7 +15,7 @@ export interface CommentListProps {
   comments: Comment[];
   beadId: string;
   projectPath: string;
-  onCommentAdded?: () => void;
+  onCommentAdded?: () => void | Promise<void>;
 }
 
 /**
@@ -76,7 +76,7 @@ export function CommentList({
     try {
       await addComment(beadId, newComment.trim(), projectPath);
       setNewComment("");
-      onCommentAdded?.();
+      await onCommentAdded?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add comment");
     } finally {

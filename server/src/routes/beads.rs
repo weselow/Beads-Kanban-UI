@@ -2,7 +2,7 @@
 //!
 //! Provides endpoints for reading beads data.
 //! Supports two data sources:
-//! - **Dolt** (preferred): reads via `bd list --json` + `bd sql` CLI commands
+//! - **Dolt** (preferred): reads via `bd list --json` plus `bd sql` or `bd export`
 //! - **JSONL** (fallback): reads from `.beads/issues.jsonl` if bd CLI is unavailable
 
 use axum::{
@@ -355,8 +355,8 @@ fn upsert_counts_cache(
 
 /// Reads beads from the Dolt database via `bd` CLI.
 ///
-/// Calls `bd list --json` for issues and `bd sql` for comments,
-/// then merges them together.
+/// Calls `bd list --json` for issues and loads comments from `bd sql`,
+/// `bd export`, or the on-disk JSONL fallback, then merges them together.
 async fn read_beads_from_cli(project_path: &Path, updated_after: Option<&str>) -> Result<Vec<Bead>, String> {
     // Get beads, optionally filtered by updated_after
     let list_output = if let Some(since) = updated_after {
@@ -376,19 +376,23 @@ async fn read_beads_from_cli(project_path: &Path, updated_after: Option<&str>) -
     let mut beads: Vec<Bead> = serde_json::from_str(json_str)
         .map_err(|e| format!("Failed to parse bd list output: {}", e))?;
 
-    // Get all comments. Try `bd sql` first; on any failure (notably "not yet
-    // supported in embedded mode" for JSONL-only projects), fall back to
-    // reading comments from .beads/issues.jsonl, which embeds them per issue.
+    // Get all comments. Prefer `bd sql` for server-backed projects. Embedded
+    // Dolt does not support `bd sql`, so use `bd export` as the bulk fallback;
+    // unlike the optional on-disk JSONL export, it reads directly from the
+    // active store and includes comments in each issue record.
     let mut comments_map: HashMap<String, Vec<Comment>> = HashMap::new();
     let sql_result = run_bd(
         &["sql", "SELECT * FROM comments ORDER BY issue_id, id", "--json"],
         project_path,
     )
     .await;
-    match sql_result {
+    let loaded_from_sql = match sql_result {
         Ok(output) => {
-            let json_str = extract_json_array(&output).unwrap_or("[]");
-            match serde_json::from_str::<Vec<Comment>>(json_str) {
+            match extract_json_array(&output)
+                .and_then(|json| {
+                    serde_json::from_str::<Vec<Comment>>(json)
+                        .map_err(|e| format!("Failed to parse bd sql comments: {}", e))
+                }) {
                 Ok(comments) => {
                     for comment in comments {
                         comments_map
@@ -396,14 +400,28 @@ async fn read_beads_from_cli(project_path: &Path, updated_after: Option<&str>) -
                             .or_default()
                             .push(comment);
                     }
+                    true
                 }
-                Err(_) => {
-                    tracing::warn!("Failed to parse comments from bd sql, falling back to JSONL");
-                    load_comments_from_jsonl(project_path, &mut comments_map);
+                Err(e) => {
+                    tracing::warn!("{}; trying bd export", e);
+                    false
                 }
             }
         }
-        Err(_) => {
+        Err(e) => {
+            tracing::debug!("bd sql unavailable ({}); trying bd export", e);
+            false
+        }
+    };
+
+    if !loaded_from_sql {
+        if let Err(export_err) =
+            load_comments_from_export(project_path, &mut comments_map).await
+        {
+            tracing::warn!(
+                "Failed to load comments from bd export ({}); falling back to JSONL",
+                export_err
+            );
             load_comments_from_jsonl(project_path, &mut comments_map);
         }
     }
@@ -417,23 +435,47 @@ async fn read_beads_from_cli(project_path: &Path, updated_after: Option<&str>) -
     Ok(beads)
 }
 
+/// Returns `true` if a parsed JSONL value is a non-issue record.
+///
+/// Current `bd` exports tag regular issues with `"_type":"issue"`. Older
+/// exports omit `_type`, so both forms must be accepted.
+fn is_non_issue_value(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .and_then(|obj| obj.get("_type"))
+        .is_some_and(|record_type| record_type.as_str() != Some("issue"))
+}
+
 /// Returns `true` if a JSONL line is a non-issue record that should be skipped.
 ///
 /// Newer `bd` versions append service records (e.g. `bd remember` memories)
-/// into `issues.jsonl`, marked with a `_type` field and lacking an `id`.
-/// These must not be parsed as beads. We treat the presence of a top-level
-/// `_type` key as the discriminator so future record types are skipped too.
+/// into `issues.jsonl`. These must not be parsed as beads, while records tagged
+/// with `"_type":"issue"` remain normal issues.
 fn is_non_issue_record(line: &str) -> bool {
-    matches!(
-        serde_json::from_str::<serde_json::Value>(line),
-        Ok(serde_json::Value::Object(ref obj)) if obj.contains_key("_type")
-    )
+    serde_json::from_str::<serde_json::Value>(line)
+        .is_ok_and(|value| is_non_issue_value(&value))
+}
+
+/// Reads the JSONL emitted by `bd export` and inserts embedded comments.
+async fn load_comments_from_export(
+    project_path: &Path,
+    comments_map: &mut HashMap<String, Vec<Comment>>,
+) -> Result<(), String> {
+    let output = run_bd(&["export"], project_path).await?;
+    let beads = parse_beads_from_jsonl(&output);
+
+    if beads.is_empty() && !output.trim().is_empty() {
+        return Err("bd export returned no parseable issue records".to_string());
+    }
+
+    insert_comments_from_beads(beads, comments_map);
+    Ok(())
 }
 
 /// Reads comments from .beads/issues.jsonl and inserts them into `comments_map`.
-/// Used when `bd sql` is unavailable (embedded mode).
+/// Last-resort fallback for older `bd` versions where both SQL and export fail.
 fn load_comments_from_jsonl(project_path: &Path, comments_map: &mut HashMap<String, Vec<Comment>>) {
-    let issues_path = project_path.join(".beads").join("issues.jsonl");
+    let issues_path = resolve_issues_path(project_path);
     let jsonl_beads = match read_beads_from_jsonl(&issues_path) {
         Ok(b) => b,
         Err(e) => {
@@ -441,7 +483,14 @@ fn load_comments_from_jsonl(project_path: &Path, comments_map: &mut HashMap<Stri
             return;
         }
     };
-    for bead in jsonl_beads {
+    insert_comments_from_beads(jsonl_beads, comments_map);
+}
+
+fn insert_comments_from_beads(
+    beads: Vec<Bead>,
+    comments_map: &mut HashMap<String, Vec<Comment>>,
+) {
+    for bead in beads {
         if let Some(comments) = bead.comments {
             if !comments.is_empty() {
                 comments_map.insert(bead.id, comments);
@@ -454,7 +503,12 @@ fn load_comments_from_jsonl(project_path: &Path, comments_map: &mut HashMap<Stri
 fn read_beads_from_jsonl(issues_path: &Path) -> Result<Vec<Bead>, String> {
     let contents = std::fs::read_to_string(issues_path)
         .map_err(|e| format!("Failed to read file: {}", e))?;
+    Ok(parse_beads_from_jsonl(&contents))
+}
 
+/// Parses issue records from JSONL text, ignoring service records and malformed
+/// lines. Shared by the on-disk fallback and `bd export` stdout handling.
+fn parse_beads_from_jsonl(contents: &str) -> Vec<Bead> {
     let mut beads = Vec::new();
     for (line_num, line) in contents.lines().enumerate() {
         let line = line.trim();
@@ -472,7 +526,7 @@ fn read_beads_from_jsonl(issues_path: &Path) -> Result<Vec<Bead>, String> {
             }
         }
     }
-    Ok(beads)
+    beads
 }
 
 /// Dolt-only path prefix: `dolt://beads_dbname`
@@ -1067,10 +1121,7 @@ pub fn recompute_epic_statuses(issues_path: &Path) -> Result<Vec<String>, String
             Ok(value) => {
                 // Skip non-issue service records (e.g. `bd remember` memories),
                 // but keep them in raw_lines for lossless write-back.
-                if value
-                    .as_object()
-                    .is_some_and(|o| o.contains_key("_type"))
-                {
+                if is_non_issue_value(&value) {
                     raw_lines.push(value);
                     continue;
                 }
@@ -1227,6 +1278,13 @@ mod tests {
     #[test]
     fn test_is_non_issue_record_issue() {
         assert!(!is_non_issue_record(
+            r#"{"_type":"issue","id":"x-1","title":"T","status":"open"}"#
+        ));
+    }
+
+    #[test]
+    fn test_is_non_issue_record_legacy_issue() {
+        assert!(!is_non_issue_record(
             r#"{"id":"x-1","title":"T","status":"open"}"#
         ));
     }
@@ -1252,6 +1310,82 @@ mod tests {
         let bead: Bead = serde_json::from_str(json).unwrap();
         assert_eq!(bead.comments.as_ref().unwrap().len(), 1);
         assert_eq!(bead.comments.as_ref().unwrap()[0].text, "A comment");
+    }
+
+    #[test]
+    fn test_parse_new_format_jsonl_with_comments() {
+        let jsonl = concat!(
+            "{\"_type\":\"memory\",\"key\":\"ignore\",\"value\":\"me\"}\n",
+            "{\"_type\":\"issue\",\"id\":\"test-456\",\"title\":\"With Comments\",",
+            "\"status\":\"open\",\"comments\":[{\"id\":\"comment-1\",",
+            "\"issue_id\":\"test-456\",\"author\":\"user\",\"text\":\"Visible\",",
+            "\"created_at\":\"2026-01-01T00:00:00Z\"}]}\n"
+        );
+
+        let beads = parse_beads_from_jsonl(jsonl);
+        assert_eq!(beads.len(), 1);
+        assert_eq!(beads[0].id, "test-456");
+        assert_eq!(beads[0].comments.as_ref().unwrap()[0].text, "Visible");
+    }
+
+    #[test]
+    fn test_load_comments_from_sync_branch_jsonl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let beads_dir = project.join(".beads");
+        let sync_beads_dir = project
+            .join(".git")
+            .join("beads-worktrees")
+            .join("beads-sync")
+            .join(".beads");
+        std::fs::create_dir_all(&beads_dir).unwrap();
+        std::fs::create_dir_all(&sync_beads_dir).unwrap();
+        std::fs::write(
+            beads_dir.join("config.yaml"),
+            "sync-branch: beads-sync\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sync_beads_dir.join("issues.jsonl"),
+            concat!(
+                "{\"_type\":\"issue\",\"id\":\"sync-1\",\"title\":\"Synced\",",
+                "\"status\":\"open\",\"comments\":[{\"id\":\"comment-1\",",
+                "\"issue_id\":\"sync-1\",\"author\":\"user\",\"text\":\"From worktree\",",
+                "\"created_at\":\"2026-01-01T00:00:00Z\"}]}\n"
+            ),
+        )
+        .unwrap();
+
+        let mut comments = HashMap::new();
+        load_comments_from_jsonl(project, &mut comments);
+
+        assert_eq!(comments["sync-1"].len(), 1);
+        assert_eq!(comments["sync-1"][0].text, "From worktree");
+    }
+
+    #[test]
+    fn test_recompute_epic_statuses_with_typed_issue_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let issues_path = tmp.path().join("issues.jsonl");
+        std::fs::write(
+            &issues_path,
+            concat!(
+                "{\"_type\":\"issue\",\"id\":\"epic-1\",\"title\":\"Epic\",",
+                "\"status\":\"open\",\"issue_type\":\"epic\"}\n",
+                "{\"_type\":\"issue\",\"id\":\"epic-1.1\",\"title\":\"Child\",",
+                "\"status\":\"in_progress\",\"parent\":\"epic-1\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let updated = recompute_epic_statuses(&issues_path).unwrap();
+        assert_eq!(updated, vec!["epic-1"]);
+
+        let contents = std::fs::read_to_string(issues_path).unwrap();
+        let epic: serde_json::Value =
+            serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(epic["status"], "in_progress");
+        assert_eq!(epic["_type"], "issue");
     }
 
     #[test]
