@@ -43,14 +43,51 @@ pub async fn health() -> impl IntoResponse {
 /// Searches PATH first, then common install locations.
 static BD_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
+/// Builds the list of well-known `bd` install locations to probe after PATH.
+///
+/// The binary name carries an `.exe` suffix on Windows for every candidate —
+/// the official installers write `bd.exe`, so a suffix-less path never matches.
+fn bd_candidates() -> Vec<PathBuf> {
+    let bd_bin = if cfg!(windows) { "bd.exe" } else { "bd" };
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Official Windows installer (install.ps1) target — probed before $HOME
+    // locations because it is the documented Windows install path.
+    if cfg!(windows) {
+        if let Some(local_appdata) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(PathBuf::from(local_appdata).join("Programs").join("bd").join(bd_bin));
+        }
+    }
+
+    if let Some(home) = UserDirs::new().map(|d| d.home_dir().to_path_buf()) {
+        candidates.push(home.join(".cargo").join("bin").join(bd_bin));
+        candidates.push(home.join(".local").join("bin").join(bd_bin));
+        candidates.push(home.join(".beads").join("bin").join(bd_bin));
+        // `go install` default location
+        candidates.push(home.join("go").join("bin").join(bd_bin));
+    }
+
+    if !cfg!(windows) {
+        candidates.push(PathBuf::from("/usr/local/bin/bd"));
+        // Homebrew on Apple Silicon
+        candidates.push(PathBuf::from("/opt/homebrew/bin/bd"));
+    }
+
+    candidates
+}
+
 /// Returns the path to the `bd` CLI binary, or `None` if not found.
 ///
 /// Search order:
 /// 1. `bd` in PATH (via `which`/`where`)
-/// 2. `~/.cargo/bin/bd`
-/// 3. `~/.local/bin/bd`
-/// 4. `/usr/local/bin/bd`
+/// 2. `%LOCALAPPDATA%\Programs\bd\bd.exe` (Windows — official `install.ps1` target)
+/// 3. `~/.cargo/bin/bd`
+/// 4. `~/.local/bin/bd`
 /// 5. `~/.beads/bin/bd`
+/// 6. `~/go/bin/bd` (`go install`)
+/// 7. `/usr/local/bin/bd`, `/opt/homebrew/bin/bd` (unix only)
+///
+/// The binary name gets an `.exe` suffix on Windows for every candidate.
 pub fn find_bd() -> Option<&'static PathBuf> {
     BD_PATH.get_or_init(|| {
         // Try PATH first
@@ -69,20 +106,7 @@ pub fn find_bd() -> Option<&'static PathBuf> {
         }
 
         // Search common locations
-        let home = UserDirs::new().map(|d| d.home_dir().to_path_buf());
-        let candidates: Vec<PathBuf> = if let Some(ref home) = home {
-            let mut c = vec![
-                home.join(".cargo").join("bin").join(if cfg!(windows) { "bd.exe" } else { "bd" }),
-                home.join(".local").join("bin").join("bd"),
-                home.join(".beads").join("bin").join("bd"),
-            ];
-            if !cfg!(windows) {
-                c.push(PathBuf::from("/usr/local/bin/bd"));
-            }
-            c
-        } else {
-            vec![]
-        };
+        let candidates = bd_candidates();
 
         for candidate in &candidates {
             if candidate.exists() {
@@ -93,7 +117,8 @@ pub fn find_bd() -> Option<&'static PathBuf> {
 
         tracing::warn!(
             "bd CLI not found. Searched PATH and: {}. \
-             Install bd (https://github.com/gastownhall/beads) or add it to PATH.",
+             Install bd (https://github.com/gastownhall/beads) or add it to PATH. \
+             Note: the installer edits PATH, so restart beads-web after installing.",
             candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
         );
         None
@@ -186,6 +211,38 @@ mod tests {
             let result = validate_path_security(&test_path);
             // Should either succeed or fail with "Invalid path" (if test doesn't exist)
             assert!(result.is_ok() || result.unwrap_err().contains("Invalid"));
+        }
+    }
+
+    #[test]
+    fn test_bd_candidates_use_platform_binary_name() {
+        let candidates = bd_candidates();
+        assert!(!candidates.is_empty(), "expected at least the $HOME candidates");
+
+        let expected = if cfg!(windows) { "bd.exe" } else { "bd" };
+        for candidate in &candidates {
+            let name = candidate.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            assert_eq!(name, expected, "wrong binary name in {}", candidate.display());
+        }
+    }
+
+    #[test]
+    fn test_bd_candidates_cover_installer_locations() {
+        let candidates: Vec<String> = bd_candidates()
+            .iter()
+            .map(|p| p.display().to_string().replace('\\', "/"))
+            .collect();
+        let has = |needle: &str| candidates.iter().any(|c| c.contains(needle));
+
+        // `go install` target — both platforms
+        assert!(has("go/bin/bd"), "missing go/bin candidate: {candidates:?}");
+
+        if cfg!(windows) {
+            // Official install.ps1 target
+            assert!(has("Programs/bd/bd.exe"), "missing LOCALAPPDATA candidate: {candidates:?}");
+        } else {
+            assert!(has("/usr/local/bin/bd"), "missing /usr/local/bin candidate: {candidates:?}");
+            assert!(has("/opt/homebrew/bin/bd"), "missing homebrew candidate: {candidates:?}");
         }
     }
 

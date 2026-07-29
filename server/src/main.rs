@@ -148,12 +148,17 @@ async fn main() {
             if !trimmed.is_empty() && !trimmed.starts_with('[') {
                 tracing::warn!("⚠ bd CLI does not support --json output");
                 tracing::warn!("  Beads will not load for filesystem projects");
-                tracing::warn!("  Please update: npm install -g beads");
+                tracing::warn!("  Please update: npm install -g @beads/bd");
             }
         }
     } else {
         tracing::warn!("⚠ bd CLI not found — beads read/write will not work for filesystem projects");
-        tracing::warn!("  Install: https://github.com/gastownhall/beads");
+        if cfg!(windows) {
+            tracing::warn!("  Install: irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex");
+        } else {
+            tracing::warn!("  Install: curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash");
+        }
+        tracing::warn!("  Or: npm install -g @beads/bd — then restart beads-web (the installer edits PATH)");
     }
 
     // Initialize version check cache
