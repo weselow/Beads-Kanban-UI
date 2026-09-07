@@ -82,3 +82,6 @@ beads_*/
 beads-web-linux-*
 beads-web-win-*
 beads-web-darwin-*
+
+# Beads orchestration
+.claude/.upgrades/
