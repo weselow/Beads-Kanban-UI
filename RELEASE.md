@@ -22,10 +22,12 @@ distribution channel.
 
 ### 1. Bump the version
 
-The version lives in four files that are **not** auto-synced. Update all of
+The version lives in five files that are **not** auto-synced. Update all of
 them to the new version (e.g. `0.12.0`):
 
 - `package.json` → `"version"`
+- `package-lock.json` → both `"version"` fields; run `npm install --package-lock-only`
+  after bumping `package.json` instead of editing it by hand
 - `server/Cargo.toml` → `version`
 - `server/Cargo.lock` → `version` in the `[[package]] name = "beads-server"` block
 - `flake.nix` → **both** `version = "…"` lines (the frontend package and the default package)
@@ -74,16 +76,25 @@ entering the version (e.g. `v0.12.0`).
    `wingetcreate update weselow.beads-web` to open a version-bump PR against
    `microsoft/winget-pkgs` (skipped if `WINGET_TOKEN` is unset).
 
-> **A red winget job does not mean a failed release.** `wingetcreate update`
-> only works once the package exists in the catalog, so until the first
-> submission PR is merged this job fails with
+> The winget job used to fail every run with
 > `repos/microsoft/winget-pkgs/contents/manifests/w/weselow/beads-web was not
-> found`. It runs after `release`, so the GitHub Release, Scoop, and Homebrew are
-> already published by then and are unaffected. Nothing to fix — just don't
-> re-run the release on account of it.
+> found`, because `wingetcreate update` only works once the package exists in
+> the catalog. That is over: the first submission
+> (microsoft/winget-pkgs#402396) was merged on 2026-07-29 and the catalog
+> carries 0.11.2 and 0.12.2, so the job now opens a real version-bump PR. If it
+> goes red again, the release itself is still fine — winget runs after
+> `release`, so the GitHub Release, Scoop, and Homebrew are already published.
 
 Separately, `.github/workflows/ci.yml` runs on every push to `main` and keeps the
 Nix `npmDepsHash` current, auto-committing the refreshed hash when it drifts.
+
+`.github/workflows/quality.yml` runs on every pull request and every push to
+`main`: ESLint, `tsc --noEmit` and vitest for the frontend, `clippy
+--all-targets -D warnings` and `cargo test --lib --bins` for the server. It has
+to be green before you tag — it is the only thing standing between a regression
+and a release. On Windows a bare `cargo test` hangs because the `memory_bd`
+integration test starts Dolt, which is why CI runs `--lib --bins`; use the same
+locally.
 
 ### 4. After the release
 
@@ -128,12 +139,10 @@ asks (`@microsoft-github-policy-service agree`).
 
 ## Known gaps
 
-- **No test/lint CI on push or PR.** Nothing runs `vitest`, `cargo test`,
-  `clippy`, `tsc`, or `eslint` automatically, so a regression can merge — or ship
-  in a release — undetected. Until that is added, run `npm run lint`,
-  `npm run typecheck`, `npm run test`, and (in `server/`) `cargo test --lib`
-  locally before tagging. On Windows `cargo test` (full) hangs because the
-  `memory_bd` integration test starts Dolt — use `cargo test --lib`.
 - **Version duplication.** The version is repeated in `package.json`,
-  `server/Cargo.toml`, `server/Cargo.lock`, and `flake.nix` (twice) with no
-  automated consistency check.
+  `package-lock.json` (twice), `server/Cargo.toml`, `server/Cargo.lock`, and
+  `flake.nix` (twice) with no automated consistency check.
+- **Two pushes per release.** Bumping `package-lock.json` changes the npm
+  dependency hash, so `ci.yml` auto-commits a refreshed `npmDepsHash` to `main`
+  after the version-bump push. Pull that commit before tagging, or the tag
+  points at a `flake.nix` whose hash is already stale.
