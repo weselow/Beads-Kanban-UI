@@ -94,7 +94,7 @@ async fn test_memory_bd_round_trip() {
 
     // -- List → empty --
     let resp = client
-        .get(format!("{}/api/memory?path={}", base, &tmp_str))
+        .get(format!("{}/api/memory?path={}", base, tmp_str))
         .send()
         .await
         .unwrap();
@@ -120,7 +120,7 @@ async fn test_memory_bd_round_trip() {
 
     // -- List → contains test-key with content "hello" --
     let resp = client
-        .get(format!("{}/api/memory?path={}", base, &tmp_str))
+        .get(format!("{}/api/memory?path={}", base, tmp_str))
         .send()
         .await
         .unwrap();
@@ -145,7 +145,7 @@ async fn test_memory_bd_round_trip() {
 
     // -- List → content is "updated" --
     let resp = client
-        .get(format!("{}/api/memory?path={}", base, &tmp_str))
+        .get(format!("{}/api/memory?path={}", base, tmp_str))
         .send()
         .await
         .unwrap();
@@ -170,7 +170,7 @@ async fn test_memory_bd_round_trip() {
 
     // -- List → empty again --
     let resp = client
-        .get(format!("{}/api/memory?path={}", base, &tmp_str))
+        .get(format!("{}/api/memory?path={}", base, tmp_str))
         .send()
         .await
         .unwrap();
