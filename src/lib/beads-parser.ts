@@ -107,6 +107,12 @@ export function getUnknownStatusNames(beads: Bead[]): string[] {
 export interface LoadProjectBeadsResult {
   beads: Bead[];
   source?: string;
+  /**
+   * Total number of comments in the project, reported by the server on every
+   * response — also on incremental ones, where `beads` holds only the changed
+   * records. `undefined` means the server did not report it.
+   */
+  commentTotal?: number;
 }
 
 export async function loadProjectBeads(projectPath: string, options?: { updatedAfter?: string }): Promise<Bead[]>;
@@ -123,7 +129,7 @@ export async function loadProjectBeads(projectPath: string, options?: { withSour
     }
   }
   if (options?.withSource) {
-    return { beads: mapped, source: result.source };
+    return { beads: mapped, source: result.source, commentTotal: result.comment_total };
   }
   return mapped;
 }

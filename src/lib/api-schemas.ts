@@ -40,6 +40,12 @@ export const BeadSchema = z.object({
 export const BeadsResponseSchema = z.object({
   beads: z.array(BeadSchema),
   source: z.string().optional(),
+  /**
+   * Total number of comments in the whole project, independent of the
+   * `updated_after` filter. Lets the client tell a comment-only change apart
+   * from "nothing happened" without asking for the full payload.
+   */
+  comment_total: z.number().optional(),
 });
 
 export const PRChecksSchema = z.object({
