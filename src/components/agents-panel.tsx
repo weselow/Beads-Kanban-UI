@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/sheet";
 import { useAgents } from "@/hooks/use-agents";
 import { cn } from "@/lib/utils";
-import type { Agent, AgentModel } from "@/types";
+import type { Agent, AgentModel, AgentToolsValue } from "@/types";
 
 export interface AgentsPanelProps {
   /** Whether the panel is open */
@@ -29,10 +29,13 @@ export interface AgentsPanelProps {
  * Model badge color configuration.
  * Each model gets a distinct color for quick visual identification.
  */
-const MODEL_COLORS: Record<
-  AgentModel,
-  { bg: string; text: string; border: string }
-> = {
+interface ModelColors {
+  bg: string;
+  text: string;
+  border: string;
+}
+
+const MODEL_COLORS: Record<AgentModel, ModelColors> = {
   opus: {
     bg: "bg-blocked-accent/15",
     text: "text-blocked-accent",
@@ -50,24 +53,67 @@ const MODEL_COLORS: Record<
   },
 };
 
+/**
+ * Neutral colours for a model the panel does not know: "inherit", "opusplan",
+ * a full model id, or an empty field.
+ */
+const UNKNOWN_MODEL_COLORS: ModelColors = {
+  bg: "bg-surface-overlay",
+  text: "text-t-muted",
+  border: "border-b-strong/50",
+};
+
+/**
+ * Look up the badge colours for a model name, falling back to a neutral style
+ * so an unknown value renders instead of crashing.
+ */
+function getModelColors(model: string): ModelColors {
+  return Object.prototype.hasOwnProperty.call(MODEL_COLORS, model)
+    ? MODEL_COLORS[model as AgentModel]
+    : UNKNOWN_MODEL_COLORS;
+}
+
+/** Label shown when the agent file has no model field. */
+const DEFAULT_MODEL_LABEL = "default";
+
 /** All available model options */
 const MODEL_OPTIONS: AgentModel[] = ["haiku", "sonnet", "opus"];
 
+/** Marker meaning "every tool". */
+const ALL_TOOLS_MARKER = "*";
+
+/** Split a comma separated `tools:` value into trimmed, non-empty names. */
+function splitToolNames(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+}
+
 /**
  * Format the tools display for collapsed view.
+ *
+ * The server normalises `tools` to "*", a list, or null, but a comma separated
+ * string can still arrive from an older server build, so that shape is handled
+ * too. A missing field means the agent inherits every tool.
  */
-function formatToolsSummary(tools: string[] | "*"): string {
-  if (tools === "*") return "All tools";
-  if (tools.length === 0) return "No tools";
-  if (tools.length <= 2) return tools.join(", ");
-  return `${tools.slice(0, 2).join(", ")} +${tools.length - 2}`;
+export function formatToolsSummary(tools: AgentToolsValue | undefined): string {
+  if (tools === null || tools === undefined) return "All tools";
+  if (tools === ALL_TOOLS_MARKER) return "All tools";
+
+  const names = typeof tools === "string" ? splitToolNames(tools) : tools;
+
+  if (names.length === 0) return "No tools";
+  if (names.length <= 2) return names.join(", ");
+  return `${names.slice(0, 2).join(", ")} +${names.length - 2}`;
 }
 
 /**
  * Model badge component for displaying the current model.
  */
-function ModelBadge({ model }: { model: AgentModel }) {
-  const colors = MODEL_COLORS[model];
+function ModelBadge({ model }: { model: string }) {
+  const colors = getModelColors(model);
+  const label = model.trim() || DEFAULT_MODEL_LABEL;
   return (
     <span
       className={cn(
@@ -77,7 +123,7 @@ function ModelBadge({ model }: { model: AgentModel }) {
         colors.border
       )}
     >
-      {model}
+      {label}
     </span>
   );
 }
@@ -100,7 +146,7 @@ function AgentCard({
   onToggleAllTools: () => void;
   isUpdating: boolean;
 }) {
-  const hasAllTools = agent.tools === "*";
+  const hasAllTools = agent.tools === ALL_TOOLS_MARKER;
 
   return (
     <div className="rounded-lg border border-b-default bg-surface-raised/50 overflow-hidden">
@@ -155,7 +201,7 @@ function AgentCard({
             >
               {MODEL_OPTIONS.map((model) => {
                 const isSelected = agent.model === model;
-                const colors = MODEL_COLORS[model];
+                const colors = getModelColors(model);
                 return (
                   <button
                     key={model}
@@ -277,7 +323,11 @@ export function AgentsPanel({
       if (model === agent.model) return;
       setUpdatingFilename(agent.filename);
       try {
-        await updateAgent(agent.filename, model, agent.tools === "*");
+        await updateAgent(
+          agent.filename,
+          model,
+          agent.tools === ALL_TOOLS_MARKER
+        );
       } catch {
         // Error is logged in hook
       } finally {
@@ -292,7 +342,7 @@ export function AgentsPanel({
    */
   const handleToggleAllTools = useCallback(
     async (agent: Agent) => {
-      const currentlyAllTools = agent.tools === "*";
+      const currentlyAllTools = agent.tools === ALL_TOOLS_MARKER;
       setUpdatingFilename(agent.filename);
       try {
         await updateAgent(agent.filename, agent.model, !currentlyAllTools);

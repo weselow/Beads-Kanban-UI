@@ -340,9 +340,22 @@ export interface MemoryEntry {
 // ============================================================================
 
 /**
- * Supported model names for Claude agents
+ * Model names the panel offers as switchable options.
+ *
+ * An agent file may hold any other value ("inherit", "opusplan", a full model
+ * id, or nothing at all) — see {@link Agent.model}.
  */
 export type AgentModel = "opus" | "sonnet" | "haiku";
+
+/**
+ * Value of the `tools:` field as it reaches the client.
+ *
+ * The server normalises it to `"*"` (all tools) or an array of tool names, and
+ * sends `null` when the field is absent — which also means "all tools".
+ * A different string may still arrive from an older server build, so callers
+ * must cope with any string.
+ */
+export type AgentToolsValue = string[] | string | null;
 
 /**
  * An agent definition from .claude/agents/*.md
@@ -352,12 +365,16 @@ export interface Agent {
   filename: string;
   /** Display name of the agent */
   name: string;
-  /** Model the agent uses */
-  model: AgentModel;
+  /**
+   * Model written in the agent file, verbatim. Usually one of
+   * {@link AgentModel}, but "inherit", "opusplan", a full model id and an
+   * empty string (field absent) are all legitimate.
+   */
+  model: string;
   /** Description of the agent's role */
   description: string;
-  /** List of allowed tools, or "*" for all tools */
-  tools: string[] | "*";
+  /** Allowed tools: a list, "*" for all tools, or null when the field is absent */
+  tools?: AgentToolsValue;
   /** Optional nickname for the agent */
   nickname: string | null;
 }
