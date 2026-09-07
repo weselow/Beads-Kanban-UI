@@ -17,7 +17,7 @@ interface ErrorBoundaryState {
 
 /**
  * React Error Boundary that catches render errors in child components.
- * Shows a user-friendly fallback with retry button instead of crashing the whole page.
+ * Shows a user-friendly fallback with retry and reload buttons instead of crashing the whole page.
  */
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   constructor(props: ErrorBoundaryProps) {
@@ -37,11 +37,15 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     this.setState({ hasError: false, error: null });
   };
 
+  handleReload = () => {
+    window.location.reload();
+  };
+
   render() {
     if (this.state.hasError) {
       return (
         <div className="flex flex-col items-center justify-center gap-4 p-8 text-center">
-          <div className="text-sm text-danger">
+          <div role="alert" className="text-sm text-danger">
             {this.props.label
               ? `${this.props.label} encountered an error`
               : "Something went wrong"}
@@ -51,9 +55,14 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
               {this.state.error.message}
             </pre>
           )}
-          <Button variant="outline" size="sm" onClick={this.handleRetry}>
-            Try again
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={this.handleRetry}>
+              Try again
+            </Button>
+            <Button variant="outline" size="sm" onClick={this.handleReload}>
+              Reload page
+            </Button>
+          </div>
         </div>
       );
     }

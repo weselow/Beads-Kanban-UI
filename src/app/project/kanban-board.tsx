@@ -349,8 +349,12 @@ export default function KanbanBoard() {
         />
       </div>
 
-      {/* Kanban Columns */}
+      {/* Kanban Columns.
+          The boundary sits inside <main> on purpose: a render error in the
+          columns must not take down the header and the filter bar, which are
+          the user's way back to the project list. */}
       <main className="flex-1 overflow-hidden p-4">
+        <ErrorBoundary label="Kanban Board">
         {beadsLoading ? (
           <div className="flex items-center justify-center h-full">
             <div role="status" className="text-t-muted">Loading beads…</div>
@@ -379,6 +383,7 @@ export default function KanbanBoard() {
             ))}
           </div>
         )}
+        </ErrorBoundary>
       </main>
 
       {/* Bead Detail Sheet */}
