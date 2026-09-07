@@ -54,6 +54,10 @@ export interface BeadDetailProps {
   projectPath?: string;
   allBeads?: Bead[];
   onChildClick?: (child: Bead) => void;
+  /** Step back to the previously viewed bead; falls back to closing the panel */
+  onBack?: () => void;
+  /** Whether a previous bead is available to go back to (affects the aria-label only) */
+  canGoBack?: boolean;
   onCleanup?: () => void;
   onUpdate?: () => void;
 }
@@ -72,6 +76,8 @@ export function BeadDetail({
   projectPath,
   allBeads,
   onChildClick,
+  onBack,
+  canGoBack,
   onCleanup,
   onUpdate,
 }: BeadDetailProps) {
@@ -226,12 +232,13 @@ export function BeadDetail({
           open ? "translate-x-0" : "translate-x-full"
         )}
       >
-          {/* Header with Back button */}
+          {/* Header with Back button — always visible; at the top level it closes the panel */}
           <div className="flex items-center justify-between mb-6">
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => onOpenChange(false)}
+              onClick={() => (onBack ? onBack() : onOpenChange(false))}
+              aria-label={canGoBack ? "Back to parent task" : "Close panel"}
               className="gap-1.5 -ml-2"
             >
               <ArrowLeft className="h-4 w-4" aria-hidden="true" />
