@@ -353,11 +353,30 @@ fn upsert_counts_cache(
     }
 }
 
+/// Counts the comments attached to the given beads.
+///
+/// Used for the `comment_total` field of the `/api/beads` response: the client
+/// compares it between polls and only asks for a full payload when it moved.
+fn count_comments(beads: &[Bead]) -> usize {
+    beads
+        .iter()
+        .map(|bead| bead.comments.as_ref().map_or(0, |c| c.len()))
+        .sum()
+}
+
 /// Reads beads from the Dolt database via `bd` CLI.
 ///
 /// Calls `bd list --json` for issues and loads comments from `bd sql`,
 /// `bd export`, or the on-disk JSONL fallback, then merges them together.
-async fn read_beads_from_cli(project_path: &Path, updated_after: Option<&str>) -> Result<Vec<Bead>, String> {
+///
+/// Returns the beads plus the total number of comments in the whole project.
+/// The total is deliberately independent of `updated_after`: comments are
+/// always loaded in bulk, while the bead list may be filtered, so the count
+/// stays comparable between an incremental and a full read.
+async fn read_beads_from_cli(
+    project_path: &Path,
+    updated_after: Option<&str>,
+) -> Result<(Vec<Bead>, usize), String> {
     // Get beads, optionally filtered by updated_after
     let list_output = if let Some(since) = updated_after {
         let updated_flag = format!("--updated-after={}", since);
@@ -426,13 +445,17 @@ async fn read_beads_from_cli(project_path: &Path, updated_after: Option<&str>) -
         }
     }
 
+    // Count before draining the map: it holds every comment in the project,
+    // including those on beads the `updated_after` filter left out.
+    let comment_total: usize = comments_map.values().map(|c| c.len()).sum();
+
     for bead in &mut beads {
         if let Some(bead_comments) = comments_map.remove(&bead.id) {
             bead.comments = Some(bead_comments);
         }
     }
 
-    Ok(beads)
+    Ok((beads, comment_total))
 }
 
 /// Returns `true` if a parsed JSONL value is a non-issue record.
@@ -561,7 +584,8 @@ pub async fn read_beads(
             Ok(beads) => {
                 let beads = post_process_beads(beads);
                 upsert_counts_cache(&db, &path, "dolt-direct", &beads);
-                (StatusCode::OK, Json(serde_json::json!({ "beads": beads, "source": "dolt-direct" })))
+                let comment_total = count_comments(&beads);
+                (StatusCode::OK, Json(serde_json::json!({ "beads": beads, "source": "dolt-direct", "comment_total": comment_total })))
             }
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -614,7 +638,8 @@ pub async fn read_beads(
                         tracing::info!("Read {} beads from per-project Dolt (port {})", beads.len(), port);
                         let beads = post_process_beads(beads);
                         upsert_counts_cache(&db, &path, "dolt-project", &beads);
-                        return (StatusCode::OK, Json(serde_json::json!({ "beads": beads, "source": "dolt-project" })));
+                        let comment_total = count_comments(&beads);
+                        return (StatusCode::OK, Json(serde_json::json!({ "beads": beads, "source": "dolt-project", "comment_total": comment_total })));
                     }
                     Err(e) => {
                         tracing::warn!("Per-project Dolt server on port {} failed: {}, falling back", port, e);
@@ -627,13 +652,18 @@ pub async fn read_beads(
     }
 
     // Three-tier fallback: Dolt SQL → bd CLI → JSONL
+    //
+    // The third element is the project-wide comment total when the tier knows
+    // it better than the returned beads do; `None` means "count the beads".
+    // Only the bd CLI tier honours `updated_after`, so only it can return a
+    // partial bead list whose own comments would undercount the project.
 
     // Tier 1: Try Dolt SQL (direct MySQL connection)
-    let (beads, source) = 'fallback: {
+    let (beads, source, cli_comment_total) = 'fallback: {
         if dolt_manager.is_available() {
             if let Some(db_name) = dolt::database_name_for_project(&project_path) {
                 match dolt_manager.read_beads(&db_name).await {
-                    Ok(b) => break 'fallback (b, "dolt-central"),
+                    Ok(b) => break 'fallback (b, "dolt-central", None),
                     Err(crate::dolt::DoltError::DatabaseNotFound(_)) => {
                         tracing::info!("Dolt database {} not found on SQL server, trying bd CLI", db_name);
                         // Don't skip CLI — bd can read from local .beads/dolt in direct mode
@@ -647,10 +677,16 @@ pub async fn read_beads(
 
         // Tier 2: Try bd CLI
         match read_beads_from_cli(&project_path, params.updated_after.as_deref()).await {
-            Ok(b) => {
+            Ok((b, comment_total)) => {
                 let mode = if params.updated_after.is_some() { "incremental" } else { "full" };
-                tracing::info!("Read {} beads from bd CLI for {} ({})", b.len(), path, mode);
-                break 'fallback (b, "cli");
+                tracing::info!(
+                    "Read {} beads and {} comments from bd CLI for {} ({})",
+                    b.len(),
+                    comment_total,
+                    path,
+                    mode
+                );
+                break 'fallback (b, "cli", Some(comment_total));
             }
             Err(cli_err) => {
                 tracing::warn!("bd CLI failed for {}: {}", path, cli_err);
@@ -666,7 +702,7 @@ pub async fn read_beads(
             );
         }
         match read_beads_from_jsonl(&issues_path) {
-            Ok(b) => (b, "jsonl"),
+            Ok(b) => (b, "jsonl", None),
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -678,7 +714,8 @@ pub async fn read_beads(
 
     let beads = post_process_beads(beads);
     upsert_counts_cache(&db, &path, source, &beads);
-    (StatusCode::OK, Json(serde_json::json!({ "beads": beads, "source": source })))
+    let comment_total = cli_comment_total.unwrap_or_else(|| count_comments(&beads));
+    (StatusCode::OK, Json(serde_json::json!({ "beads": beads, "source": source, "comment_total": comment_total })))
 }
 
 /// Request body for creating a new bead.
@@ -1326,6 +1363,27 @@ mod tests {
         assert_eq!(beads.len(), 1);
         assert_eq!(beads[0].id, "test-456");
         assert_eq!(beads[0].comments.as_ref().unwrap()[0].text, "Visible");
+    }
+
+    #[test]
+    fn test_count_comments_sums_across_beads() {
+        let jsonl = concat!(
+            "{\"_type\":\"issue\",\"id\":\"a\",\"title\":\"A\",\"status\":\"open\",",
+            "\"comments\":[{\"id\":\"c1\",\"issue_id\":\"a\",\"author\":\"u\",",
+            "\"text\":\"one\",\"created_at\":\"2026-01-01T00:00:00Z\"},",
+            "{\"id\":\"c2\",\"issue_id\":\"a\",\"author\":\"u\",\"text\":\"two\",",
+            "\"created_at\":\"2026-01-01T00:00:00Z\"}]}\n",
+            "{\"_type\":\"issue\",\"id\":\"b\",\"title\":\"B\",\"status\":\"open\"}\n"
+        );
+
+        let beads = parse_beads_from_jsonl(jsonl);
+        assert_eq!(beads.len(), 2);
+        assert_eq!(count_comments(&beads), 2);
+    }
+
+    #[test]
+    fn test_count_comments_on_empty_input() {
+        assert_eq!(count_comments(&[]), 0);
     }
 
     #[test]

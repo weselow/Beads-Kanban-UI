@@ -94,6 +94,8 @@ export function useBeads(projectPath: string): UseBeadsResult {
   const isLoadingRef = useRef(false);
   // Track latest updated_at for incremental polling
   const lastUpdatedRef = useRef<string | null>(null);
+  // Total comment count reported by the server; null when it reports none.
+  const commentTotalRef = useRef<number | null>(null);
 
   /**
    * Load beads from the project directory
@@ -129,6 +131,8 @@ export function useBeads(projectPath: string): UseBeadsResult {
       });
       const fetchedBeads = result.beads;
       setDataSource(result.source ?? null);
+      commentTotalRef.current =
+        typeof result.commentTotal === "number" ? result.commentTotal : null;
 
       // Compute max updated_at from fetched results
       const maxUpdated = fetchedBeads.reduce((max, b) => {
@@ -189,6 +193,7 @@ export function useBeads(projectPath: string): UseBeadsResult {
   useEffect(() => {
     hasLoadedRef.current = false;
     lastUpdatedRef.current = null;
+    commentTotalRef.current = null;
     setDataSource(null);
     void loadBeads({ full: true });
   }, [loadBeads]);
@@ -217,6 +222,22 @@ export function useBeads(projectPath: string): UseBeadsResult {
     }
   }, [watchError, error]);
 
+  /**
+   * One polling round: an incremental read first, and the expensive full read
+   * only when it is really needed. A comment added to an untouched bead does
+   * not advance issue.updated_at, so the incremental read would miss it — the
+   * server's project-wide comment total gives that away. When the server does
+   * not report a total at all, fall back to a full read so no comment is lost.
+   */
+  const pollBeads = useCallback(async () => {
+    const previousTotal = commentTotalRef.current;
+    await loadBeads();
+    const currentTotal = commentTotalRef.current;
+    if (currentTotal === null || currentTotal !== previousTotal) {
+      await loadBeads({ full: true });
+    }
+  }, [loadBeads]);
+
   // Poll database-backed sources. Filesystem projects using embedded Dolt may
   // have JSONL export disabled, so their file watcher has nothing to observe.
   useEffect(() => {
@@ -226,11 +247,11 @@ export function useBeads(projectPath: string): UseBeadsResult {
     if (!projectPath || !shouldPoll) return;
 
     const intervalId = setInterval(() => {
-      void loadBeads({ full: true });
+      void pollBeads();
     }, 15_000);
 
     return () => clearInterval(intervalId);
-  }, [projectPath, dataSource, loadBeads]);
+  }, [projectPath, dataSource, pollBeads]);
 
   return {
     beads,
