@@ -196,7 +196,10 @@ export default function KanbanBoard() {
   const {
     detailBead,
     isDetailOpen,
+    canGoBack,
     openBead,
+    pushBead,
+    goBack,
     handleDetailOpenChange,
     navigateToBead,
   } = useBeadDetail(beads);
@@ -389,7 +392,9 @@ export default function KanbanBoard() {
           onOpenChange={handleDetailOpenChange}
           projectPath={project?.path ?? ""}
           allBeads={beads}
-          onChildClick={openBead}
+          onChildClick={pushBead}
+          onBack={goBack}
+          canGoBack={canGoBack}
           onUpdate={refreshBeads}
         >
           <CommentList
