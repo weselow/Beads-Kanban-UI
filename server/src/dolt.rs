@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::TcpStream;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::routes::beads::{Bead, Comment};
 
@@ -110,6 +110,10 @@ impl DoltManager {
     }
 
     /// Creates a new bead in a Dolt database and commits the change.
+    ///
+    /// The issue row and the parent link are written inside one SQL
+    /// transaction, so a failing link cannot leave a parented bead behind
+    /// without its parent. The Dolt commit follows the SQL commit.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_bead(
         &self,
@@ -126,88 +130,70 @@ impl DoltManager {
 
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-        // First, query the table schema to find all NOT NULL columns without defaults
-        // so we can provide empty values for them
-        let schema_query = "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
-             WHERE TABLE_SCHEMA = :db AND TABLE_NAME = 'issues' \
-             AND IS_NULLABLE = 'NO' AND COLUMN_DEFAULT IS NULL \
-             AND COLUMN_NAME NOT IN ('id', 'title', 'description', 'status', 'priority', \
-             'issue_type', 'owner', 'created_at', 'updated_at')".to_string();
-        let extra_cols: Vec<String> = conn.exec_map(
-            schema_query,
-            mysql_async::params! { "db" => db_name },
-            |col_name: String| col_name,
-        ).await.unwrap_or_default();
-
-        // Build INSERT with all required columns
-        let mut columns = vec![
-            "id", "title", "description", "status", "priority",
-            "issue_type", "owner", "created_at", "updated_at",
-        ];
-        let mut values = vec![
-            ":id", ":title", ":desc", "'open'", ":priority",
-            ":type", "'web-ui'", ":now", ":now",
-        ];
-
-        // Add empty string for any extra NOT NULL columns
-        for col in &extra_cols {
-            columns.push(col);
-            values.push("''");
-        }
-
-        let query = format!(
-            "INSERT INTO `{}`.issues ({}) VALUES ({})",
-            db_name,
-            columns.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", "),
-            values.join(", "),
-        );
-        conn.exec_drop(
-            &query,
-            mysql_async::params! {
-                "id" => id,
-                "title" => title,
-                "desc" => description,
-                "priority" => priority,
-                "type" => issue_type,
-                "now" => &now,
-            },
-        ).await.map_err(|e| DoltError::QueryFailed(format!("insert: {}", e)))?;
-
-        // Insert parent-child dependency if parent specified
-        if let Some(parent) = parent_id {
-            // The target column was renamed in bd 1.1.0 — resolve it from the schema.
-            let schema = dependency_schema(&mut conn, db_name).await?;
-
-            // `created_by` is NOT NULL with no default in both schemas.
-            let mut dep_columns = vec!["issue_id", schema.depends_on.as_str(), "type", "created_by"];
-            let mut dep_values = vec![":child", ":parent", "'parent-child'", "'web-ui'"];
-            // bd 1.1.x keys the table on a char(36) `id` with no default, so an
-            // omitted id would collide on the second insert. bd 1.0.x has no such column.
-            if schema.has_id {
-                dep_columns.push("id");
-                dep_values.push(":dep_id");
+        // Schema introspection happens before the transaction: these are reads,
+        // and `USE` below would implicitly commit an open transaction anyway.
+        let extra_cols = issue_extra_columns(&mut conn, db_name).await;
+        let issue_query = build_issue_insert(db_name, &extra_cols);
+        let dep_query = match parent_id {
+            Some(_) => {
+                let schema = dependency_schema(&mut conn, db_name).await?;
+                Some(build_dependency_insert(db_name, &schema))
             }
+            None => None,
+        };
 
-            let dep_query = format!(
-                "INSERT INTO `{}`.dependencies ({}) VALUES ({})",
-                db_name,
-                dep_columns.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", "),
-                dep_values.join(", "),
-            );
-            conn.exec_drop(
-                &dep_query,
-                mysql_async::params! {
-                    "child" => id,
-                    "parent" => parent,
-                    "dep_id" => uuid::Uuid::new_v4().to_string(),
-                },
-            ).await.map_err(|e| DoltError::QueryFailed(format!("dependency: {}", e)))?;
-        }
-
-        // Dolt commit — must USE the database first
+        // DOLT_COMMIT needs the database selected, and `USE` implicitly commits
+        // whatever transaction is open — so it has to run first.
         let use_query = format!("USE `{}`", db_name);
         conn.query_drop(&use_query).await
             .map_err(|e| DoltError::QueryFailed(format!("use_db: {}", e)))?;
+
+        conn.query_drop("START TRANSACTION").await
+            .map_err(|e| DoltError::QueryFailed(format!("begin: {}", e)))?;
+
+        // Both rows have to land together. A committed issue whose parent link
+        // failed is an orphan that nothing else cleans up.
+        let written = async {
+            conn.exec_drop(
+                &issue_query,
+                mysql_async::params! {
+                    "id" => id,
+                    "title" => title,
+                    "desc" => description,
+                    "priority" => priority,
+                    "type" => issue_type,
+                    "now" => &now,
+                },
+            ).await.map_err(|e| DoltError::QueryFailed(format!("insert: {}", e)))?;
+
+            if let (Some(dep_query), Some(parent)) = (&dep_query, parent_id) {
+                conn.exec_drop(
+                    dep_query,
+                    mysql_async::params! {
+                        "child" => id,
+                        "parent" => parent,
+                        "dep_id" => uuid::Uuid::new_v4().to_string(),
+                    },
+                ).await.map_err(|e| DoltError::QueryFailed(format!("dependency: {}", e)))?;
+            }
+
+            conn.query_drop("COMMIT").await
+                .map_err(|e| DoltError::QueryFailed(format!("commit: {}", e)))?;
+
+            Ok::<(), DoltError>(())
+        }.await;
+
+        if let Err(e) = written {
+            if let Err(rollback_err) = conn.query_drop("ROLLBACK").await {
+                warn!(
+                    "Rollback after a failed create of {} did not go through (db: {}): {}",
+                    id, db_name, rollback_err
+                );
+            }
+            warn!("Failed to create bead {} in Dolt (db: {}): {}", id, db_name, e);
+            return Err(e);
+        }
+
         let commit_query = format!(
             "CALL DOLT_COMMIT('-Am', 'web-ui: create {}')", id
         );
@@ -490,6 +476,71 @@ struct DependencySchema {
     depends_on: String,
     /// Whether the table has the bd 1.1.x `id` primary key.
     has_id: bool,
+}
+
+/// Lists the `issues` columns that are NOT NULL without a default.
+///
+/// bd adds columns between releases; anything required that this build does not
+/// know about gets an empty string in the insert instead of failing the write.
+/// A failed introspection query degrades to "no extra columns" — the insert
+/// then reports the real problem itself.
+async fn issue_extra_columns(conn: &mut mysql_async::Conn, db_name: &str) -> Vec<String> {
+    let schema_query = "SELECT COLUMN_NAME FROM information_schema.COLUMNS          WHERE TABLE_SCHEMA = :db AND TABLE_NAME = 'issues'          AND IS_NULLABLE = 'NO' AND COLUMN_DEFAULT IS NULL          AND COLUMN_NAME NOT IN ('id', 'title', 'description', 'status', 'priority',          'issue_type', 'owner', 'created_at', 'updated_at')".to_string();
+
+    conn.exec_map(
+        schema_query,
+        mysql_async::params! { "db" => db_name },
+        |col_name: String| col_name,
+    ).await.unwrap_or_default()
+}
+
+/// Builds the `INSERT` that creates an issue row.
+///
+/// `extra_cols` comes from [`issue_extra_columns`] and is filled with empty
+/// strings; the rest are named parameters bound by the caller.
+fn build_issue_insert(db_name: &str, extra_cols: &[String]) -> String {
+    let mut columns = vec![
+        "id", "title", "description", "status", "priority",
+        "issue_type", "owner", "created_at", "updated_at",
+    ];
+    let mut values = vec![
+        ":id", ":title", ":desc", "'open'", ":priority",
+        ":type", "'web-ui'", ":now", ":now",
+    ];
+
+    for col in extra_cols {
+        columns.push(col.as_str());
+        values.push("''");
+    }
+
+    format_insert(db_name, "issues", &columns, &values)
+}
+
+/// Builds the `INSERT` that links a new issue to its parent.
+fn build_dependency_insert(db_name: &str, schema: &DependencySchema) -> String {
+    // `created_by` is NOT NULL with no default in both schemas.
+    let mut columns = vec!["issue_id", schema.depends_on.as_str(), "type", "created_by"];
+    let mut values = vec![":child", ":parent", "'parent-child'", "'web-ui'"];
+
+    // bd 1.1.x keys the table on a char(36) `id` with no default, so an omitted
+    // id would collide on the second insert. bd 1.0.x has no such column.
+    if schema.has_id {
+        columns.push("id");
+        values.push(":dep_id");
+    }
+
+    format_insert(db_name, "dependencies", &columns, &values)
+}
+
+/// Assembles `INSERT INTO \`db\`.table (cols) VALUES (vals)` with quoted columns.
+fn format_insert(db_name: &str, table: &str, columns: &[&str], values: &[&str]) -> String {
+    format!(
+        "INSERT INTO `{}`.{} ({}) VALUES ({})",
+        db_name,
+        table,
+        columns.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", "),
+        values.join(", "),
+    )
 }
 
 /// Detects the `dependencies` table layout from the live schema.
@@ -789,5 +840,64 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let obj = parsed.as_object().unwrap();
         assert_eq!(obj.len(), 2);
+    }
+    // ── create_bead statement builders ──────────────────────────────────
+
+    #[test]
+    fn test_issue_insert_has_the_base_columns() {
+        let query = build_issue_insert("beads_demo", &[]);
+
+        assert!(query.starts_with("INSERT INTO `beads_demo`.issues ("));
+        for col in ["id", "title", "description", "status", "priority",
+                    "issue_type", "owner", "created_at", "updated_at"] {
+            assert!(query.contains(&format!("`{}`", col)), "missing column {} in {}", col, query);
+        }
+        // A new bead always starts open, and the web UI owns the row.
+        assert!(query.contains("'open'"));
+        assert!(query.contains("'web-ui'"));
+    }
+
+    #[test]
+    fn test_issue_insert_fills_extra_not_null_columns_with_empty_strings() {
+        // Columns the live schema reports as NOT NULL without a default get an
+        // empty value so the insert does not fail on a schema we have not seen.
+        let extra = vec!["created_by".to_string(), "source_repo".to_string()];
+        let query = build_issue_insert("beads_demo", &extra);
+
+        assert!(query.contains("`created_by`"));
+        assert!(query.contains("`source_repo`"));
+        // Nine placeholders/literals for the base columns, plus one '' each.
+        assert_eq!(query.matches("''").count(), 2);
+    }
+
+    #[test]
+    fn test_dependency_insert_uses_the_resolved_target_column() {
+        // bd 1.1.x renamed depends_on_id -> depends_on_issue_id.
+        let schema = DependencySchema {
+            depends_on: "depends_on_issue_id".to_string(),
+            has_id: false,
+        };
+        let query = build_dependency_insert("beads_demo", &schema);
+
+        assert!(query.starts_with("INSERT INTO `beads_demo`.dependencies ("));
+        assert!(query.contains("`depends_on_issue_id`"));
+        assert!(!query.contains("depends_on_id`"));
+        assert!(query.contains("'parent-child'"));
+        // No `id` column in bd 1.0.x, so no placeholder for it either.
+        assert!(!query.contains(":dep_id"));
+    }
+
+    #[test]
+    fn test_dependency_insert_supplies_an_id_when_the_schema_has_one() {
+        // bd 1.1.x keys the table on a char(36) id with no default: without a
+        // value the second insert of a session collides on the primary key.
+        let schema = DependencySchema {
+            depends_on: "depends_on_issue_id".to_string(),
+            has_id: true,
+        };
+        let query = build_dependency_insert("beads_demo", &schema);
+
+        assert!(query.contains("`id`"));
+        assert!(query.contains(":dep_id"));
     }
 }
