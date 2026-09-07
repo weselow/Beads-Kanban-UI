@@ -115,4 +115,9 @@ Single binary — frontend is embedded via rust-embed. No npm publish needed.
 
 - Upstream remote removed — fully independent from original repo
 - Tag named "main" was deleted (caused ambiguous ref errors with branch "main")
-- PR branches kept: feature/*, fix/* that were submitted to original repo
+- Local branches are deleted once merged — including work that reached main via
+  cherry-pick or rebase, where `git branch --merged` cannot see it. Verify with
+  `git cherry -v main <branch>`: a leading `-` means the patch is already upstream.
+- The old PR branches (feature/*, fix/* submitted to the original repo) were removed
+  on 2026-09-07; their content is all in main and the upstream remote is long gone.
+  Stale counterparts may still exist on origin.
