@@ -18,6 +18,11 @@ import {
 import { isDoltProject } from "@/lib/utils";
 import type { Bead, BeadStatus } from "@/types";
 
+export interface RefreshBeadsOptions {
+  /** Ignore the incremental cursor and replace state with a complete response. */
+  full?: boolean;
+}
+
 /**
  * Result type for the useBeads hook
  */
@@ -32,8 +37,8 @@ export interface UseBeadsResult {
   isLoading: boolean;
   /** Any error that occurred during loading */
   error: Error | null;
-  /** Manually refresh beads from the file */
-  refresh: () => Promise<void>;
+  /** Manually refresh beads, optionally bypassing incremental loading. */
+  refresh: (options?: RefreshBeadsOptions) => Promise<void>;
 }
 
 /**
@@ -82,6 +87,7 @@ export function useBeads(projectPath: string): UseBeadsResult {
   );
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
+  const [dataSource, setDataSource] = useState<string | null>(null);
 
   // Track if initial load has completed
   const hasLoadedRef = useRef(false);
@@ -92,11 +98,12 @@ export function useBeads(projectPath: string): UseBeadsResult {
   /**
    * Load beads from the project directory
    */
-  const loadBeads = useCallback(async () => {
+  const loadBeads = useCallback(async (options?: RefreshBeadsOptions) => {
     if (!projectPath) {
       setBeads([]);
       setBeadsByStatus(EMPTY_GROUPED);
       setTicketNumbers(new Map());
+      setDataSource(null);
       setIsLoading(false);
       return;
     }
@@ -112,8 +119,16 @@ export function useBeads(projectPath: string): UseBeadsResult {
 
     try {
       // Incremental fetch: pass updatedAfter on subsequent loads
-      const updatedAfter = hasLoadedRef.current ? lastUpdatedRef.current ?? undefined : undefined;
-      const fetchedBeads = await loadProjectBeads(projectPath, { updatedAfter });
+      const updatedAfter =
+        !options?.full && hasLoadedRef.current
+          ? lastUpdatedRef.current ?? undefined
+          : undefined;
+      const result = await loadProjectBeads(projectPath, {
+        withSource: true,
+        updatedAfter,
+      });
+      const fetchedBeads = result.beads;
+      setDataSource(result.source ?? null);
 
       // Compute max updated_at from fetched results
       const maxUpdated = fetchedBeads.reduce((max, b) => {
@@ -123,7 +138,7 @@ export function useBeads(projectPath: string): UseBeadsResult {
       if (maxUpdated) lastUpdatedRef.current = maxUpdated;
 
       let loadedBeads: Bead[];
-      if (hasLoadedRef.current && updatedAfter) {
+      if (!options?.full && hasLoadedRef.current && updatedAfter) {
         // Incremental update — merge changed beads into existing state
         setBeads(prev => {
           const beadMap = new Map(prev.map(b => [b.id, b]));
@@ -166,15 +181,22 @@ export function useBeads(projectPath: string): UseBeadsResult {
   /**
    * Public refresh function for manual reload
    */
-  const refresh = useCallback(async () => {
-    await loadBeads();
+  const refresh = useCallback(async (options?: RefreshBeadsOptions) => {
+    await loadBeads(options);
   }, [loadBeads]);
 
   // Initial load when project path changes
   useEffect(() => {
     hasLoadedRef.current = false;
     lastUpdatedRef.current = null;
-    loadBeads();
+    setDataSource(null);
+    void loadBeads({ full: true });
+  }, [loadBeads]);
+
+  const handleWatchedChange = useCallback(() => {
+    // JSONL comment changes do not advance issue.updated_at, so watcher
+    // notifications must bypass the incremental cursor.
+    void loadBeads({ full: true });
   }, [loadBeads]);
 
   // Set up file watcher for real-time updates
@@ -182,7 +204,7 @@ export function useBeads(projectPath: string): UseBeadsResult {
   // because the backend watch API appends .beads/issues.jsonl to the provided path
   const { error: watchError } = useFileWatcher(
     projectPath,
-    loadBeads,
+    handleWatchedChange,
     100 // 100ms debounce as per spec
   );
 
@@ -195,16 +217,20 @@ export function useBeads(projectPath: string): UseBeadsResult {
     }
   }, [watchError, error]);
 
-  // Polling for dolt:// projects (no file watcher available)
+  // Poll database-backed sources. Filesystem projects using embedded Dolt may
+  // have JSONL export disabled, so their file watcher has nothing to observe.
   useEffect(() => {
-    if (!projectPath || !isDoltProject(projectPath)) return;
+    const shouldPoll =
+      isDoltProject(projectPath) ||
+      (dataSource !== null && dataSource !== "jsonl");
+    if (!projectPath || !shouldPoll) return;
 
     const intervalId = setInterval(() => {
-      loadBeads();
+      void loadBeads({ full: true });
     }, 15_000);
 
     return () => clearInterval(intervalId);
-  }, [projectPath, loadBeads]);
+  }, [projectPath, dataSource, loadBeads]);
 
   return {
     beads,
