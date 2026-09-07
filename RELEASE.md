@@ -76,6 +76,20 @@ entering the version (e.g. `v0.12.0`).
    `wingetcreate update weselow.beads-web` to open a version-bump PR against
    `microsoft/winget-pkgs` (skipped if `WINGET_TOKEN` is unset).
 
+> **The winget job needs a fresh fork.** `wingetcreate` pushes the manifest to
+> your fork of `microsoft/winget-pkgs` and opens the PR from there. The fork
+> goes stale between releases and the job then dies with `The forked repository
+> could not be synced with the upstream commits. Sync your fork manually and try
+> again.` — it happened on 0.12.3, where the fork was ~23000 commits behind.
+> Fix and re-run:
+>
+> ```bash
+> gh repo sync weselow/winget-pkgs --source microsoft/winget-pkgs
+> gh run rerun <run-id> --failed
+> ```
+>
+> Nothing is lost: the fork carries no commits of its own.
+
 > The winget job used to fail every run with
 > `repos/microsoft/winget-pkgs/contents/manifests/w/weselow/beads-web was not
 > found`, because `wingetcreate update` only works once the package exists in
@@ -142,6 +156,10 @@ asks (`@microsoft-github-policy-service agree`).
 - **Version duplication.** The version is repeated in `package.json`,
   `package-lock.json` (twice), `server/Cargo.toml`, `server/Cargo.lock`, and
   `flake.nix` (twice) with no automated consistency check.
+- **The winget fork is not synced automatically.** `release.yml` has no step
+  that runs `gh repo sync` before `wingetcreate`, so every release starts with a
+  fork that is thousands of commits behind and the job fails until it is synced
+  by hand (tracked in beads).
 - **Two pushes per release.** Bumping `package-lock.json` changes the npm
   dependency hash, so `ci.yml` auto-commits a refreshed `npmDepsHash` to `main`
   after the version-bump push. Pull that commit before tagging, or the tag
