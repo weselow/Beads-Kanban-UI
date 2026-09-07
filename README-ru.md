@@ -116,6 +116,8 @@ Beads Web даёт вам Kanban-доску в реальном времени, 
 | macOS Intel | `beads-web-darwin-x64` |
 | Linux x64 | `beads-web-linux-x64` |
 
+К каждому выпуску прикладывается `SHA256SUMS.txt` — по нему можно проверить скачанный файл.
+
 ### Менеджеры пакетов
 
 **Scoop (Windows):**
@@ -144,8 +146,6 @@ brew install weselow/beads-web/beads-web
 ```powershell
 winget install weselow.beads-web
 ```
-
-> winget станет доступен после того, как заявка будет принята в общий каталог winget.
 
 ### Запуск
 
