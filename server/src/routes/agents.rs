@@ -22,12 +22,63 @@ use super::validate_path_security;
 
 /// Represents the `tools` field in agent frontmatter.
 ///
-/// Can be either a wildcard string `"*"` (all tools) or a list of tool names.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+/// Values are normalised while parsing so the API always answers with one of
+/// two shapes: the string `"*"` (all tools) or an array of tool names.
+/// A comma separated scalar such as `tools: Read, Grep, Glob` — the common
+/// Claude Code spelling — becomes a list, never a raw string.
+#[derive(Debug, Serialize, Clone)]
 #[serde(untagged)]
 pub enum AgentTools {
     All(String),
     List(Vec<String>),
+}
+
+/// Marker used in frontmatter and on the wire for "every tool".
+const ALL_TOOLS_MARKER: &str = "*";
+
+/// Trim tool names and drop the empty ones.
+fn clean_tool_names<I>(items: I) -> Vec<String>
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    items
+        .into_iter()
+        .map(|name| name.as_ref().trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// Turn a scalar `tools:` value into the normalised form.
+///
+/// `"*"` keeps its "all tools" meaning; anything else is treated as a comma
+/// separated list of tool names.
+fn normalize_tools_scalar(raw: &str) -> AgentTools {
+    let trimmed = raw.trim();
+    if trimmed == ALL_TOOLS_MARKER {
+        return AgentTools::All(ALL_TOOLS_MARKER.to_string());
+    }
+    AgentTools::List(clean_tool_names(trimmed.split(',')))
+}
+
+impl<'de> Deserialize<'de> for AgentTools {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// Raw shapes accepted from YAML frontmatter and from JSON.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RawTools {
+            Scalar(String),
+            List(Vec<String>),
+        }
+
+        Ok(match RawTools::deserialize(deserializer)? {
+            RawTools::Scalar(value) => normalize_tools_scalar(&value),
+            RawTools::List(items) => AgentTools::List(clean_tool_names(items)),
+        })
+    }
 }
 
 /// Information about a single agent parsed from its `.md` file.
@@ -35,10 +86,14 @@ pub enum AgentTools {
 pub struct AgentInfo {
     pub filename: String,
     pub name: String,
+    /// Model name exactly as written in the file. Kept as a free string on
+    /// purpose: `inherit`, `opusplan` and full model ids are all legitimate,
+    /// and a missing field yields an empty string.
     #[serde(default)]
     pub model: String,
     #[serde(default)]
     pub description: String,
+    /// `None` when the file has no `tools:` field, which means "all tools".
     #[serde(default)]
     pub tools: Option<AgentTools>,
     /// The agent's nickname/persona, extracted from the markdown body.
@@ -353,7 +408,7 @@ pub async fn update_agent(
         if payload.all_tools {
             map.insert(
                 serde_yaml::Value::String("tools".to_string()),
-                serde_yaml::Value::String("*".to_string()),
+                serde_yaml::Value::String(ALL_TOOLS_MARKER.to_string()),
             );
         }
     }
@@ -592,5 +647,167 @@ mod tests {
             AgentTools::All(s) => assert_eq!(s, "*"),
             _ => panic!("Expected All"),
         }
+    }
+
+    // -- Normalisation of the `tools:` field ------------------------------
+
+    #[test]
+    fn test_parse_agent_file_with_comma_separated_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("explorer.md");
+        fs::write(
+            &file_path,
+            "---
+name: explorer
+description: Reads code
+model: sonnet
+tools: Read, Grep, Glob, Bash
+---
+
+# Body
+",
+        )
+        .unwrap();
+
+        let agent = parse_agent_file(&file_path).unwrap();
+        match agent.tools {
+            Some(AgentTools::List(tools)) => {
+                assert_eq!(
+                    tools,
+                    vec![
+                        "Read".to_string(),
+                        "Grep".to_string(),
+                        "Glob".to_string(),
+                        "Bash".to_string()
+                    ]
+                );
+            }
+            other => panic!("Expected a 4-item list, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_agent_tools_deserialize_comma_string() {
+        let tools: AgentTools = serde_json::from_str(r#""Read, Grep, Glob""#).unwrap();
+        match tools {
+            AgentTools::List(v) => assert_eq!(v, vec!["Read", "Grep", "Glob"]),
+            other => panic!("Expected List, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_agent_tools_deserialize_single_scalar_tool() {
+        let tools: AgentTools = serde_json::from_str(r#""Read""#).unwrap();
+        match tools {
+            AgentTools::List(v) => assert_eq!(v, vec!["Read"]),
+            other => panic!("Expected a one-item List, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_agent_tools_deserialize_trims_and_drops_empty() {
+        let tools: AgentTools = serde_json::from_str(r#""  Read ,, Grep ,  ""#).unwrap();
+        match tools {
+            AgentTools::List(v) => assert_eq!(v, vec!["Read", "Grep"]),
+            other => panic!("Expected List, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_agent_tools_deserialize_list_is_trimmed() {
+        let tools: AgentTools = serde_json::from_str(r#"[" Read ", "", "Glob"]"#).unwrap();
+        match tools {
+            AgentTools::List(v) => assert_eq!(v, vec!["Read", "Glob"]),
+            other => panic!("Expected List, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_agent_tools_serialize_shapes() {
+        assert_eq!(
+            serde_json::to_string(&AgentTools::All("*".to_string())).unwrap(),
+            r#""*""#
+        );
+        assert_eq!(
+            serde_json::to_string(&AgentTools::List(vec!["Read".to_string()])).unwrap(),
+            r#"["Read"]"#
+        );
+    }
+
+    #[test]
+    fn test_parse_agent_file_star_stays_all() {
+        // Both the quoted and the bare form must keep meaning "all tools".
+        for frontmatter in ["tools: '*'", "tools: *"] {
+            let dir = tempfile::tempdir().unwrap();
+            let file_path = dir.path().join("all.md");
+            fs::write(
+                &file_path,
+                format!("---
+name: all
+model: opus
+{}
+---
+
+# Body
+", frontmatter),
+            )
+            .unwrap();
+
+            let agent = parse_agent_file(&file_path).unwrap();
+            match agent.tools {
+                Some(AgentTools::All(s)) => assert_eq!(s, "*"),
+                other => panic!("Expected All for {:?}, got {:?}", frontmatter, other),
+            }
+        }
+    }
+
+    // -- Unknown model values ---------------------------------------------
+
+    #[test]
+    fn test_parse_agent_file_unknown_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("inherit.md");
+        fs::write(
+            &file_path,
+            "---
+name: inherit-agent
+description: Uses the parent model
+model: inherit
+---
+
+# Body
+",
+        )
+        .unwrap();
+
+        let agent = parse_agent_file(&file_path).unwrap();
+        assert_eq!(agent.model, "inherit");
+        assert!(agent.tools.is_none());
+    }
+
+    #[test]
+    fn test_agent_info_round_trip_keeps_unknown_model_and_null_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("opusplan.md");
+        fs::write(
+            &file_path,
+            "---
+name: planner
+model: opusplan
+---
+
+# Body
+",
+        )
+        .unwrap();
+
+        let agent = parse_agent_file(&file_path).unwrap();
+        let json = serde_json::to_string(&agent).unwrap();
+        assert!(json.contains(r#""model":"opusplan""#), "json was {}", json);
+        assert!(json.contains(r#""tools":null"#), "json was {}", json);
+
+        let back: AgentInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.model, "opusplan");
+        assert!(back.tools.is_none());
     }
 }

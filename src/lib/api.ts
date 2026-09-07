@@ -5,7 +5,7 @@
 
 import { apiUrl } from '@/lib/api-base';
 import { BeadsResponseSchema, PRStatusSchema, WorktreeStatusSchema } from '@/lib/api-schemas';
-import type { Project, Tag, Bead, WorktreeStatus, WorktreeEntry, PRStatus, PRFilesResponse, MemoryEntry, Agent, AgentModel } from '@/types';
+import type { Project, Tag, Bead, WorktreeStatus, WorktreeEntry, PRStatus, PRFilesResponse, MemoryEntry, Agent } from '@/types';
 
 /**
  * Input for creating a new project
@@ -386,7 +386,7 @@ export const agents = {
     fetchApi<Agent[]>(`/api/agents?path=${encodeURIComponent(path)}`),
 
   /** Update an agent's model or tools configuration */
-  update: (filename: string, path: string, data: { model: AgentModel; all_tools: boolean }) =>
+  update: (filename: string, path: string, data: { model: string; all_tools: boolean }) =>
     fetchApi<Agent>(`/api/agents/${encodeURIComponent(filename)}`, {
       method: 'PUT',
       body: JSON.stringify({ path, ...data }),

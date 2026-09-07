@@ -10,7 +10,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 
 import * as api from "@/lib/api";
 import { isDoltProject } from "@/lib/utils";
-import type { Agent, AgentModel } from "@/types";
+import type { Agent } from "@/types";
 
 export interface UseAgentsResult {
   /** All agents for the project */
@@ -19,10 +19,16 @@ export interface UseAgentsResult {
   isLoading: boolean;
   /** Any error that occurred during loading */
   error: Error | null;
-  /** Update an agent's model and/or all-tools setting */
+  /**
+   * Update an agent's model and/or all-tools setting.
+   *
+   * `model` is a free string: the panel offers the three known names, but an
+   * agent may already carry "inherit", "opusplan" or a full model id, and
+   * toggling all-tools must keep that value untouched.
+   */
   updateAgent: (
     filename: string,
-    model: AgentModel,
+    model: string,
     allTools: boolean
   ) => Promise<void>;
   /** Manually refresh agents list */
@@ -90,7 +96,7 @@ export function useAgents(projectPath: string): UseAgentsResult {
    * Update an agent's model and/or all-tools setting
    */
   const updateAgent = useCallback(
-    async (filename: string, model: AgentModel, allTools: boolean) => {
+    async (filename: string, model: string, allTools: boolean) => {
       if (!projectPath) return;
       try {
         await api.agents.update(filename, projectPath, {
