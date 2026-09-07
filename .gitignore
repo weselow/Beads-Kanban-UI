@@ -85,3 +85,12 @@ beads-web-darwin-*
 
 # Beads orchestration
 .claude/.upgrades/
+
+# package managers other than npm
+# The build uses npm everywhere (release.yml, quality.yml, flake.nix via
+# npmDepsHash). A stray pnpm run rewrites node_modules into the pnpm layout
+# and moves the npm-installed packages into node_modules/.ignored.
+/pnpm-lock.yaml
+/pnpm-workspace.yaml
+/yarn.lock
+/bun.lockb
