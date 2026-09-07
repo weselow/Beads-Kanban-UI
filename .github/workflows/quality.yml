@@ -1,0 +1,88 @@
+name: Quality
+
+# Nothing else runs the test suite: release.yml only fires on a tag and ci.yml
+# only refreshes the Nix hash. Without this workflow a regression can merge and
+# even ship in a release unnoticed.
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend — lint, types, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # --max-warnings 0 matches the pre-commit hook, so a warning cannot pass
+      # CI after being blocked locally.
+      - name: ESLint
+        run: npm run lint -- --max-warnings 0
+
+      - name: TypeScript
+        run: npm run typecheck
+
+      - name: Vitest
+        run: npm run test
+
+  server:
+    name: Server — clippy, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      # main.rs embeds ../out/ through rust-embed, which needs the directory to
+      # exist at compile time. These checks never serve the UI, so an empty
+      # directory is enough and saves a full frontend build.
+      - name: Create placeholder for the embedded frontend
+        run: mkdir -p out
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: server
+
+      # --lib --bins on purpose, not a bare `cargo test`: tests/memory_bd.rs
+      # shells out to `bd`, which starts a Dolt server and can hang for minutes.
+      # Clippy above still compiles every target, so a broken integration test
+      # is caught here — it just is not executed.
+      - name: Tests
+        run: cargo test --lib --bins
+        working-directory: server
