@@ -136,14 +136,14 @@ function AgentCard({
   isExpanded,
   onToggle,
   onUpdateModel,
-  onToggleAllTools,
+  onGrantAllTools,
   isUpdating,
 }: {
   agent: Agent;
   isExpanded: boolean;
   onToggle: () => void;
   onUpdateModel: (model: AgentModel) => void;
-  onToggleAllTools: () => void;
+  onGrantAllTools: () => void;
   isUpdating: boolean;
 }) {
   const hasAllTools = agent.tools === ALL_TOOLS_MARKER;
@@ -224,36 +224,29 @@ function AgentCard({
             </div>
           </div>
 
-          {/* All-tools toggle */}
-          <div className="flex items-center justify-between">
-            <label
-              htmlFor={`all-tools-${agent.filename}`}
-              className="text-xs font-medium text-t-tertiary"
-            >
-              All tools
-            </label>
+          {/* Grant-all-tools action.
+              One-way on purpose: the panel cannot pick individual tools, so it
+              cannot restore a list it overwrote with "*". Granting is offered;
+              taking back happens by editing the agent file. */}
+          <div className="space-y-1.5">
+            <span className="text-xs font-medium text-t-tertiary">Tool access</span>
             <button
-              id={`all-tools-${agent.filename}`}
               type="button"
-              role="switch"
-              aria-checked={hasAllTools}
-              disabled={isUpdating}
-              onClick={onToggleAllTools}
-              className={cn(
-                "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              disabled={isUpdating || hasAllTools}
+              onClick={onGrantAllTools}
+              title={
                 hasAllTools
-                  ? "bg-blocked-accent/30 border-blocked-accent/40"
-                  : "bg-surface-overlay border-b-strong"
+                  ? "This agent already has every tool"
+                  : "Replace the tool list with '*' in the agent file"
+              }
+              className={cn(
+                "w-full h-7 rounded-md text-xs font-medium border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                hasAllTools
+                  ? "bg-surface-overlay/50 text-t-muted border-transparent cursor-default"
+                  : "bg-surface-overlay text-t-secondary border-b-strong hover:text-t-primary hover:bg-surface-overlay/80"
               )}
             >
-              <span
-                className={cn(
-                  "pointer-events-none block size-3.5 rounded-full transition-transform",
-                  hasAllTools
-                    ? "translate-x-[18px] bg-blocked-accent"
-                    : "translate-x-[3px] bg-t-muted"
-                )}
-              />
+              {hasAllTools ? "Already has all tools" : "Grant all tools"}
             </button>
           </div>
 
@@ -338,14 +331,16 @@ export function AgentsPanel({
   );
 
   /**
-   * Handle all-tools toggle for an agent
+   * Give an agent every tool. One-way: the server only ever writes `tools: '*'`,
+   * and the panel offers no way to pick a narrower list, so it never asks the
+   * server to take the grant back.
    */
-  const handleToggleAllTools = useCallback(
+  const handleGrantAllTools = useCallback(
     async (agent: Agent) => {
-      const currentlyAllTools = agent.tools === ALL_TOOLS_MARKER;
+      if (agent.tools === ALL_TOOLS_MARKER) return;
       setUpdatingFilename(agent.filename);
       try {
-        await updateAgent(agent.filename, agent.model, !currentlyAllTools);
+        await updateAgent(agent.filename, agent.model, true);
       } catch {
         // Error is logged in hook
       } finally {
@@ -415,7 +410,7 @@ export function AgentsPanel({
                   isExpanded={expandedFilename === agent.filename}
                   onToggle={() => handleToggle(agent.filename)}
                   onUpdateModel={(model) => handleUpdateModel(agent, model)}
-                  onToggleAllTools={() => handleToggleAllTools(agent)}
+                  onGrantAllTools={() => handleGrantAllTools(agent)}
                   isUpdating={updatingFilename === agent.filename}
                 />
               ))

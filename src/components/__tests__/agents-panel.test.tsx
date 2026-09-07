@@ -128,3 +128,84 @@ describe('AgentsPanel', () => {
     }
   });
 });
+
+describe('granting all tools', () => {
+  it('offers the grant for an agent with a narrow tool list', async () => {
+    mockList.mockResolvedValue([
+      makeAgent({ name: 'narrow', tools: ['Read', 'Grep'] }),
+    ]);
+    mockUpdate.mockResolvedValue(undefined);
+
+    render(
+      <AgentsPanel open onOpenChange={() => {}} projectPath="M:/repos/demo" />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('narrow')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+
+    const grant = await screen.findByRole('button', { name: 'Grant all tools' });
+    expect(grant).toBeEnabled();
+
+    fireEvent.click(grant);
+
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalledWith('reviewer.md', 'M:/repos/demo', {
+        model: 'sonnet',
+        all_tools: true,
+      });
+    });
+  });
+
+  it('disables the grant when the agent already has every tool', async () => {
+    mockList.mockResolvedValue([makeAgent({ name: 'wide', tools: '*' })]);
+
+    render(
+      <AgentsPanel open onOpenChange={() => {}} projectPath="M:/repos/demo" />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('wide')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+
+    const grant = await screen.findByRole('button', {
+      name: 'Already has all tools',
+    });
+    expect(grant).toBeDisabled();
+
+    fireEvent.click(grant);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it('keeps the tool list when only the model changes', async () => {
+    mockList.mockResolvedValue([
+      makeAgent({ name: 'narrow', model: 'sonnet', tools: ['Read', 'Grep'] }),
+    ]);
+    mockUpdate.mockResolvedValue(undefined);
+
+    render(
+      <AgentsPanel open onOpenChange={() => {}} projectPath="M:/repos/demo" />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('narrow')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+
+    const haiku = await screen.findByRole('radio', { name: 'haiku' });
+    fireEvent.click(haiku);
+
+    // all_tools stays false, so the server leaves the existing list alone.
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalledWith('reviewer.md', 'M:/repos/demo', {
+        model: 'haiku',
+        all_tools: false,
+      });
+    });
+  });
+});

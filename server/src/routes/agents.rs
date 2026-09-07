@@ -404,7 +404,11 @@ pub async fn update_agent(
             serde_yaml::Value::String(payload.model.clone()),
         );
 
-        // Update tools field if all_tools is true
+        // Granting every tool is one-way on purpose. `all_tools: false` leaves
+        // the field untouched rather than clearing it: the caller that turned
+        // the grant on overwrote whatever list was there, so there is nothing
+        // to restore, and dropping `tools:` would mean "inherit everything"
+        // anyway. Narrowing an agent's tools is done by editing its file.
         if payload.all_tools {
             map.insert(
                 serde_yaml::Value::String("tools".to_string()),
