@@ -187,5 +187,28 @@ jobs:
           $tag = "${{ inputs.version || github.ref_name }}"
           $version = $tag.TrimStart('v')
           $url = "https://github.com/weselow/beads-web/releases/download/$tag/beads-web-win-x64.exe"
+
+          # wingetcreate pushes the manifest branch to our fork of
+          # microsoft/winget-pkgs and opens the PR from there. The fork goes
+          # stale between releases: at 0.12.3 it was ~23000 commits behind and
+          # wingetcreate died with "The forked repository could not be synced
+          # with the upstream commits." Sync it first.
+          #
+          # Never fatal. On the very first submission the fork does not exist
+          # yet — wingetcreate creates it — and any other failure here only
+          # leaves us where we were before this step existed, with the manual
+          # recovery written down in RELEASE.md. ErrorActionPreference is
+          # relaxed around the call because pwsh turns a non-zero native exit
+          # into a terminating error when it is 'Stop'.
+          $fork = "${{ github.repository_owner }}/winget-pkgs"
+          $env:GH_TOKEN = $env:WINGET_TOKEN
+          $ErrorActionPreference = 'Continue'
+          gh repo sync $fork --source microsoft/winget-pkgs
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::Could not sync $fork with microsoft/winget-pkgs (exit $LASTEXITCODE). Continuing. If wingetcreate now fails with 'The forked repository could not be synced', run 'gh repo sync $fork --source microsoft/winget-pkgs' and re-run this job."
+          }
+          $global:LASTEXITCODE = 0
+          $ErrorActionPreference = 'Stop'
+
           Invoke-WebRequest -Uri https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
           .\wingetcreate.exe update weselow.beads-web --version $version --urls $url --submit --token $env:WINGET_TOKEN
