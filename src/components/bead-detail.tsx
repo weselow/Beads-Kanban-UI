@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from "react";
 
 import {
   ArrowLeft,
@@ -90,6 +90,32 @@ export function BeadDetail({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [open, onOpenChange]);
+
+  // The panel is a single scroll container, so a newly displayed bead would inherit the
+  // previous one's offset and open mid-page. Remember where the user was per bead id.
+  const panelRef = useRef<HTMLDivElement>(null);
+  const scrollOffsets = useRef(new Map<string, number>());
+
+  // Cheap by design — a plain map write, no state, so it can run on every scroll frame.
+  // Keyed on the bead on screen right now, so the scroll event the restore below fires
+  // lands on that bead's own entry instead of overwriting the one we just left.
+  const handlePanelScroll = useCallback(() => {
+    if (!open) return;
+    scrollOffsets.current.set(bead.id, panelRef.current?.scrollTop ?? 0);
+  }, [open, bead.id]);
+
+  // Restore before paint (useLayoutEffect, not useEffect) so the correction is never
+  // visible as a jump. Keyed on bead.id rather than the bead object: a background
+  // refresh re-creates the object and must not yank the scroll position. Offsets are
+  // dropped on close, so reopening from the board always starts at the top.
+  useLayoutEffect(() => {
+    if (!open) {
+      scrollOffsets.current.clear();
+      return;
+    }
+    const panel = panelRef.current;
+    if (panel) panel.scrollTop = scrollOffsets.current.get(bead.id) ?? 0;
+  }, [open, bead.id]);
 
   const isReadOnly = !projectPath;
   const isDolt = projectPath ? isDoltProject(projectPath) : false;
@@ -227,6 +253,8 @@ export function BeadDetail({
       )}
       {/* Slide-in panel */}
       <div
+        ref={panelRef}
+        onScroll={handlePanelScroll}
         className={cn(
           "fixed inset-y-0 right-0 z-50 w-full sm:max-w-lg md:max-w-xl overflow-y-auto bg-surface-base border-l border-b-default p-6 shadow-lg transition-transform duration-300 ease-in-out",
           open ? "translate-x-0" : "translate-x-full"
